@@ -40,6 +40,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/chunkcompat"
 	"github.com/cortexproject/cortex/pkg/util/flagext"
+	"github.com/cortexproject/cortex/pkg/util/limiter"
 	util_math "github.com/cortexproject/cortex/pkg/util/math"
 	"github.com/cortexproject/cortex/pkg/util/services"
 	"github.com/cortexproject/cortex/pkg/util/test"
@@ -49,7 +50,6 @@ import (
 var (
 	errFail       = fmt.Errorf("Fail")
 	emptyResponse = &cortexpb.WriteResponse{}
-	ctx           = user.InjectOrgID(context.Background(), "user")
 )
 
 func TestConfig_Validate(t *testing.T) {
@@ -109,6 +109,7 @@ func TestDistributor_Push(t *testing.T) {
 	lastSeenTimestamp := "cortex_distributor_latest_seen_sample_timestamp_seconds"
 	distributorAppend := "cortex_distributor_ingester_appends_total"
 	distributorAppendFailure := "cortex_distributor_ingester_append_failures_total"
+	ctx := user.InjectOrgID(context.Background(), "user")
 
 	type samplesIn struct {
 		num              int
@@ -273,9 +274,11 @@ func TestDistributor_MetricsCleanup(t *testing.T) {
 
 	metrics := []string{
 		"cortex_distributor_received_samples_total",
+		"cortex_distributor_received_exemplars_total",
 		"cortex_distributor_received_metadata_total",
 		"cortex_distributor_deduped_samples_total",
 		"cortex_distributor_samples_in_total",
+		"cortex_distributor_exemplars_in_total",
 		"cortex_distributor_metadata_in_total",
 		"cortex_distributor_non_ha_samples_received_total",
 		"cortex_distributor_latest_seen_sample_timestamp_seconds",
@@ -283,9 +286,12 @@ func TestDistributor_MetricsCleanup(t *testing.T) {
 
 	d.receivedSamples.WithLabelValues("userA").Add(5)
 	d.receivedSamples.WithLabelValues("userB").Add(10)
+	d.receivedExemplars.WithLabelValues("userA").Add(5)
+	d.receivedExemplars.WithLabelValues("userB").Add(10)
 	d.receivedMetadata.WithLabelValues("userA").Add(5)
 	d.receivedMetadata.WithLabelValues("userB").Add(10)
 	d.incomingSamples.WithLabelValues("userA").Add(5)
+	d.incomingExemplars.WithLabelValues("userA").Add(5)
 	d.incomingMetadata.WithLabelValues("userA").Add(5)
 	d.nonHASamples.WithLabelValues("userA").Add(5)
 	d.dedupedSamples.WithLabelValues("userA", "cluster1").Inc() // We cannot clean this metric
@@ -318,10 +324,19 @@ func TestDistributor_MetricsCleanup(t *testing.T) {
 		cortex_distributor_received_samples_total{user="userA"} 5
 		cortex_distributor_received_samples_total{user="userB"} 10
 
+		# HELP cortex_distributor_received_exemplars_total The total number of received exemplars, excluding rejected and deduped exemplars.
+		# TYPE cortex_distributor_received_exemplars_total counter
+		cortex_distributor_received_exemplars_total{user="userA"} 5
+		cortex_distributor_received_exemplars_total{user="userB"} 10
+
 		# HELP cortex_distributor_samples_in_total The total number of samples that have come in to the distributor, including rejected or deduped samples.
 		# TYPE cortex_distributor_samples_in_total counter
 		cortex_distributor_samples_in_total{user="userA"} 5
-`), metrics...))
+
+		# HELP cortex_distributor_exemplars_in_total The total number of exemplars that have come in to the distributor, including rejected or deduped exemplars.
+		# TYPE cortex_distributor_exemplars_in_total counter
+		cortex_distributor_exemplars_in_total{user="userA"} 5
+		`), metrics...))
 
 	d.cleanupInactiveUser("userA")
 
@@ -346,9 +361,16 @@ func TestDistributor_MetricsCleanup(t *testing.T) {
 		# TYPE cortex_distributor_received_samples_total counter
 		cortex_distributor_received_samples_total{user="userB"} 10
 
+		# HELP cortex_distributor_received_exemplars_total The total number of received exemplars, excluding rejected and deduped exemplars.
+		# TYPE cortex_distributor_received_exemplars_total counter
+		cortex_distributor_received_exemplars_total{user="userB"} 10
+
 		# HELP cortex_distributor_samples_in_total The total number of samples that have come in to the distributor, including rejected or deduped samples.
 		# TYPE cortex_distributor_samples_in_total counter
-`), metrics...))
+
+		# HELP cortex_distributor_exemplars_in_total The total number of exemplars that have come in to the distributor, including rejected or deduped exemplars.
+		# TYPE cortex_distributor_exemplars_in_total counter
+		`), metrics...))
 }
 
 func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
@@ -358,6 +380,7 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 		expectedError error
 	}
 
+	ctx := user.InjectOrgID(context.Background(), "user")
 	tests := map[string]struct {
 		distributors          int
 		ingestionRateStrategy string
@@ -447,12 +470,14 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 }
 
 func TestDistributor_PushInstanceLimits(t *testing.T) {
+
 	type testPush struct {
 		samples       int
 		metadata      int
 		expectedError error
 	}
 
+	ctx := user.InjectOrgID(context.Background(), "user")
 	tests := map[string]struct {
 		preInflight    int
 		preRateSamples int        // initial rate before first push
@@ -596,7 +621,7 @@ func TestDistributor_PushInstanceLimits(t *testing.T) {
 }
 
 func TestDistributor_PushHAInstances(t *testing.T) {
-	ctx = user.InjectOrgID(context.Background(), "user")
+	ctx := user.InjectOrgID(context.Background(), "user")
 
 	for i, tc := range []struct {
 		enableTracker    bool
@@ -698,6 +723,7 @@ func TestDistributor_PushHAInstances(t *testing.T) {
 func TestDistributor_PushQuery(t *testing.T) {
 	const shuffleShardSize = 5
 
+	ctx := user.InjectOrgID(context.Background(), "user")
 	nameMatcher := mustEqualMatcher(model.MetricNameLabel, "foo")
 	barMatcher := mustEqualMatcher("bar", "baz")
 
@@ -873,6 +899,7 @@ func TestDistributor_PushQuery(t *testing.T) {
 func TestDistributor_QueryStream_ShouldReturnErrorIfMaxChunksPerQueryLimitIsReached(t *testing.T) {
 	const maxChunksLimit = 30 // Chunks are duplicated due to replication factor.
 
+	ctx := user.InjectOrgID(context.Background(), "user")
 	limits := &validation.Limits{}
 	flagext.DefaultValues(limits)
 	limits.MaxChunksPerQuery = maxChunksLimit
@@ -885,6 +912,8 @@ func TestDistributor_QueryStream_ShouldReturnErrorIfMaxChunksPerQueryLimitIsReac
 		shardByAllLabels: true,
 		limits:           limits,
 	})
+
+	ctx = limiter.AddQueryLimiterToContext(ctx, limiter.NewQueryLimiter(0, 0, maxChunksLimit))
 	defer stopAll(ds, r)
 
 	// Push a number of series below the max chunks limit. Each series has 1 sample,
@@ -924,8 +953,131 @@ func TestDistributor_QueryStream_ShouldReturnErrorIfMaxChunksPerQueryLimitIsReac
 	assert.Contains(t, err.Error(), "the query hit the max number of chunks limit")
 }
 
+func TestDistributor_QueryStream_ShouldReturnErrorIfMaxSeriesPerQueryLimitIsReached(t *testing.T) {
+	const maxSeriesLimit = 10
+
+	ctx := user.InjectOrgID(context.Background(), "user")
+	limits := &validation.Limits{}
+	flagext.DefaultValues(limits)
+	ctx = limiter.AddQueryLimiterToContext(ctx, limiter.NewQueryLimiter(maxSeriesLimit, 0, 0))
+
+	// Prepare distributors.
+	ds, _, r, _ := prepare(t, prepConfig{
+		numIngesters:     3,
+		happyIngesters:   3,
+		numDistributors:  1,
+		shardByAllLabels: true,
+		limits:           limits,
+	})
+	defer stopAll(ds, r)
+
+	// Push a number of series below the max series limit.
+	initialSeries := maxSeriesLimit
+	writeReq := makeWriteRequest(0, initialSeries, 0)
+	writeRes, err := ds[0].Push(ctx, writeReq)
+	assert.Equal(t, &cortexpb.WriteResponse{}, writeRes)
+	assert.Nil(t, err)
+
+	allSeriesMatchers := []*labels.Matcher{
+		labels.MustNewMatcher(labels.MatchRegexp, model.MetricNameLabel, ".+"),
+	}
+
+	// Since the number of series is equal to the limit (but doesn't
+	// exceed it), we expect a query running on all series to succeed.
+	queryRes, err := ds[0].QueryStream(ctx, math.MinInt32, math.MaxInt32, allSeriesMatchers...)
+	require.NoError(t, err)
+	assert.Len(t, queryRes.Chunkseries, initialSeries)
+
+	// Push more series to exceed the limit once we'll query back all series.
+	writeReq = &cortexpb.WriteRequest{}
+	writeReq.Timeseries = append(writeReq.Timeseries,
+		makeWriteRequestTimeseries([]cortexpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "another_series"}}, 0, 0),
+	)
+
+	writeRes, err = ds[0].Push(ctx, writeReq)
+	assert.Equal(t, &cortexpb.WriteResponse{}, writeRes)
+	assert.Nil(t, err)
+
+	// Since the number of series is exceeding the limit, we expect
+	// a query running on all series to fail.
+	_, err = ds[0].QueryStream(ctx, math.MinInt32, math.MaxInt32, allSeriesMatchers...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max number of series limit")
+
+}
+
+func TestDistributor_QueryStream_ShouldReturnErrorIfMaxChunkBytesPerQueryLimitIsReached(t *testing.T) {
+	const seriesToAdd = 10
+
+	ctx := user.InjectOrgID(context.Background(), "user")
+	limits := &validation.Limits{}
+	flagext.DefaultValues(limits)
+
+	// Prepare distributors.
+	// Use replication factor of 2 to always read all the chunks from both ingesters,
+	// this guarantees us to always read the same chunks and have a stable test.
+	ds, _, r, _ := prepare(t, prepConfig{
+		numIngesters:      2,
+		happyIngesters:    2,
+		numDistributors:   1,
+		shardByAllLabels:  true,
+		limits:            limits,
+		replicationFactor: 2,
+	})
+	defer stopAll(ds, r)
+
+	allSeriesMatchers := []*labels.Matcher{
+		labels.MustNewMatcher(labels.MatchRegexp, model.MetricNameLabel, ".+"),
+	}
+	// Push a single series to allow us to calculate the chunk size to calculate the limit for the test.
+	writeReq := &cortexpb.WriteRequest{}
+	writeReq.Timeseries = append(writeReq.Timeseries,
+		makeWriteRequestTimeseries([]cortexpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "another_series"}}, 0, 0),
+	)
+	writeRes, err := ds[0].Push(ctx, writeReq)
+	assert.Equal(t, &cortexpb.WriteResponse{}, writeRes)
+	assert.Nil(t, err)
+	chunkSizeResponse, err := ds[0].QueryStream(ctx, math.MinInt32, math.MaxInt32, allSeriesMatchers...)
+	require.NoError(t, err)
+
+	// Use the resulting chunks size to calculate the limit as (series to add + our test series) * the response chunk size.
+	var responseChunkSize = chunkSizeResponse.ChunksSize()
+	var maxBytesLimit = (seriesToAdd) * responseChunkSize
+
+	// Update the limiter with the calculated limits.
+	ctx = limiter.AddQueryLimiterToContext(ctx, limiter.NewQueryLimiter(0, maxBytesLimit, 0))
+
+	// Push a number of series below the max chunk bytes limit. Subtract one for the series added above.
+	writeReq = makeWriteRequest(0, seriesToAdd-1, 0)
+	writeRes, err = ds[0].Push(ctx, writeReq)
+	assert.Equal(t, &cortexpb.WriteResponse{}, writeRes)
+	assert.Nil(t, err)
+
+	// Since the number of chunk bytes is equal to the limit (but doesn't
+	// exceed it), we expect a query running on all series to succeed.
+	queryRes, err := ds[0].QueryStream(ctx, math.MinInt32, math.MaxInt32, allSeriesMatchers...)
+	require.NoError(t, err)
+	assert.Len(t, queryRes.Chunkseries, seriesToAdd)
+
+	// Push another series to exceed the chunk bytes limit once we'll query back all series.
+	writeReq = &cortexpb.WriteRequest{}
+	writeReq.Timeseries = append(writeReq.Timeseries,
+		makeWriteRequestTimeseries([]cortexpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "another_series_1"}}, 0, 0),
+	)
+
+	writeRes, err = ds[0].Push(ctx, writeReq)
+	assert.Equal(t, &cortexpb.WriteResponse{}, writeRes)
+	assert.Nil(t, err)
+
+	// Since the aggregated chunk size is exceeding the limit, we expect
+	// a query running on all series to fail.
+	_, err = ds[0].QueryStream(ctx, math.MinInt32, math.MaxInt32, allSeriesMatchers...)
+	require.Error(t, err)
+	assert.Equal(t, err, validation.LimitError(fmt.Sprintf(limiter.ErrMaxChunkBytesHit, maxBytesLimit)))
+}
+
 func TestDistributor_Push_LabelRemoval(t *testing.T) {
-	ctx = user.InjectOrgID(context.Background(), "user")
+	ctx := user.InjectOrgID(context.Background(), "user")
 
 	type testcase struct {
 		inputSeries    labels.Labels
@@ -1014,6 +1166,7 @@ func TestDistributor_Push_LabelRemoval(t *testing.T) {
 }
 
 func TestDistributor_Push_ShouldGuaranteeShardingTokenConsistencyOverTheTime(t *testing.T) {
+	ctx := user.InjectOrgID(context.Background(), "user")
 	tests := map[string]struct {
 		inputSeries    labels.Labels
 		expectedSeries labels.Labels
@@ -1089,8 +1242,6 @@ func TestDistributor_Push_ShouldGuaranteeShardingTokenConsistencyOverTheTime(t *
 	limits.DropLabels = []string{"dropped"}
 	limits.AcceptHASamples = true
 
-	ctx = user.InjectOrgID(context.Background(), "user")
-
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
 			ds, ingesters, r, _ := prepare(t, prepConfig{
@@ -1126,6 +1277,8 @@ func TestDistributor_Push_LabelNameValidation(t *testing.T) {
 		{Name: model.MetricNameLabel, Value: "foo"},
 		{Name: "999.illegal", Value: "baz"},
 	}
+	ctx := user.InjectOrgID(context.Background(), "user")
+
 	tests := map[string]struct {
 		inputLabels                labels.Labels
 		skipLabelNameValidationCfg bool
@@ -1172,10 +1325,70 @@ func TestDistributor_Push_LabelNameValidation(t *testing.T) {
 	}
 }
 
+func TestDistributor_Push_ExemplarValidation(t *testing.T) {
+	ctx := user.InjectOrgID(context.Background(), "user")
+	manyLabels := []string{model.MetricNameLabel, "test"}
+	for i := 1; i < 31; i++ {
+		manyLabels = append(manyLabels, fmt.Sprintf("name_%d", i), fmt.Sprintf("value_%d", i))
+	}
+
+	tests := map[string]struct {
+		req    *cortexpb.WriteRequest
+		errMsg string
+	}{
+		"valid exemplar": {
+			req: makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 1000, []string{"foo", "bar"}),
+		},
+		"rejects exemplar with no labels": {
+			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 1000, []string{}),
+			errMsg: `exemplar missing labels, timestamp: 1000 series: {__name__="test"} labels: {}`,
+		},
+		"rejects exemplar with no timestamp": {
+			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 0, []string{"foo", "bar"}),
+			errMsg: `exemplar missing timestamp, timestamp: 0 series: {__name__="test"} labels: {foo="bar"}`,
+		},
+		"rejects exemplar with too long labelset": {
+			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 1000, []string{"foo", strings.Repeat("0", 126)}),
+			errMsg: fmt.Sprintf(`exemplar combined labelset exceeds 128 characters, timestamp: 1000 series: {__name__="test"} labels: {foo="%s"}`, strings.Repeat("0", 126)),
+		},
+		"rejects exemplar with too many series labels": {
+			req:    makeWriteRequestExemplar(manyLabels, 0, nil),
+			errMsg: "series has too many labels",
+		},
+		"rejects exemplar with duplicate series labels": {
+			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test", "foo", "bar", "foo", "bar"}, 0, nil),
+			errMsg: "duplicate label name",
+		},
+		"rejects exemplar with empty series label name": {
+			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test", "", "bar"}, 0, nil),
+			errMsg: "invalid label",
+		},
+	}
+
+	for testName, tc := range tests {
+		t.Run(testName, func(t *testing.T) {
+			ds, _, _, _ := prepare(t, prepConfig{
+				numIngesters:     2,
+				happyIngesters:   2,
+				numDistributors:  1,
+				shuffleShardSize: 1,
+			})
+			_, err := ds[0].Push(ctx, tc.req)
+			if tc.errMsg != "" {
+				fromError, _ := status.FromError(err)
+				assert.Contains(t, fromError.Message(), tc.errMsg)
+			} else {
+				assert.Nil(t, err)
+			}
+		})
+	}
+}
+
 func BenchmarkDistributor_Push(b *testing.B) {
 	const (
 		numSeriesPerRequest = 1000
 	)
+	ctx := user.InjectOrgID(context.Background(), "user")
 
 	tests := map[string]struct {
 		prepareConfig func(limits *validation.Limits)
@@ -1367,6 +1580,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 
 	for testName, testData := range tests {
 		b.Run(testName, func(b *testing.B) {
+
 			// Create an in-memory KV store for the ring with 1 ingester registered.
 			kvStore := consul.NewInMemoryClient(ring.GetCodec())
 			err := kvStore.CAS(context.Background(), ring.IngesterRingKey,
@@ -1441,6 +1655,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 }
 
 func TestSlowQueries(t *testing.T) {
+	ctx := user.InjectOrgID(context.Background(), "user")
 	nameMatcher := mustEqualMatcher(model.MetricNameLabel, "foo")
 	nIngesters := 3
 	for _, shardByAllLabels := range []bool{true, false} {
@@ -1683,6 +1898,7 @@ type prepConfig struct {
 	skipLabelNameValidation      bool
 	maxInflightRequests          int
 	maxIngestionRate             float64
+	replicationFactor            int
 }
 
 func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, *ring.Ring, []*prometheus.Registry) {
@@ -1725,12 +1941,18 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, *rin
 	)
 	require.NoError(t, err)
 
+	// Use a default replication factor of 3 if there isn't a provided replication factor.
+	rf := cfg.replicationFactor
+	if rf == 0 {
+		rf = 3
+	}
+
 	ingestersRing, err := ring.New(ring.Config{
 		KVStore: kv.Config{
 			Mock: kvStore,
 		},
 		HeartbeatTimeout:  60 * time.Minute,
-		ReplicationFactor: 3,
+		ReplicationFactor: rf,
 	}, ring.IngesterRingKey, ring.IngesterRingKey, nil)
 	require.NoError(t, err)
 	require.NoError(t, services.StartAndAwaitRunning(context.Background(), ingestersRing))
@@ -1789,7 +2011,7 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, *rin
 	// updates to the expected size
 	if distributors[0].distributorsRing != nil {
 		test.Poll(t, time.Second, cfg.numDistributors, func() interface{} {
-			return distributors[0].distributorsRing.HealthyInstancesCount()
+			return distributors[0].distributorsLifeCycler.HealthyInstancesCount()
 		})
 	}
 
@@ -1865,6 +2087,25 @@ func makeWriteRequestHA(samples int, replica, cluster string) *cortexpb.WriteReq
 		request.Timeseries = append(request.Timeseries, ts)
 	}
 	return request
+}
+
+func makeWriteRequestExemplar(seriesLabels []string, timestamp int64, exemplarLabels []string) *cortexpb.WriteRequest {
+	return &cortexpb.WriteRequest{
+		Timeseries: []cortexpb.PreallocTimeseries{
+			{
+				TimeSeries: &cortexpb.TimeSeries{
+					// Labels: []cortexpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
+					Labels: cortexpb.FromLabelsToLabelAdapters(labels.FromStrings(seriesLabels...)),
+					Exemplars: []cortexpb.Exemplar{
+						{
+							Labels:      cortexpb.FromLabelsToLabelAdapters(labels.FromStrings(exemplarLabels...)),
+							TimestampMs: timestamp,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 func expectedResponse(start, end int) model.Matrix {
@@ -2375,7 +2616,7 @@ func TestSortLabels(t *testing.T) {
 }
 
 func TestDistributor_Push_Relabel(t *testing.T) {
-	ctx = user.InjectOrgID(context.Background(), "user")
+	ctx := user.InjectOrgID(context.Background(), "user")
 
 	type testcase struct {
 		inputSeries          labels.Labels
