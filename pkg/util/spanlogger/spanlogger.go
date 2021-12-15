@@ -2,14 +2,9 @@ package spanlogger
 
 import (
 	"context"
-<<<<<<< HEAD
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
-=======
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
->>>>>>> master
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
 	otlog "github.com/opentracing/opentracing-go/log"
