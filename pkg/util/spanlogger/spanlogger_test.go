@@ -12,15 +12,55 @@ import (
 	"github.com/weaveworks/common/user"
 )
 
-func TestSpanLogger_Log(t *testing.T) {
-	span, ctx := New(context.Background(), "test", "bar")
-	_ = span.Log("foo")
+func TestSpanLoggerLogInnerLevelError(t *testing.T) {
+	span, ctx := New(context.Background(), "test")
 	newSpan := FromContext(ctx)
 	require.Equal(t, span.Span, newSpan.Span)
-	require.Error(t, newSpan.Log("bar", "err", errors.New("err"), "metric2", 2))
-	noSpan := FromContext(context.Background())
-	_ = noSpan.Log("foo")
-	require.NoError(t, noSpan.Log("metric1", 1, "err", errors.New("err"), "metric2", 2))
+
+	fields, err, errorKeyIndex, logAsError := span.logInner("bar", "bar_value", "level", "error", "err", errors.New("err"), "metric2", "2hgd")
+	require.Nil(t, err)
+	require.True(t, logAsError)
+	require.Equal(t, errorKeyIndex, 4)
+	require.Equal(t, len(fields), 3)
+	require.Equal(t, fields[0].Key(), "bar")
+	require.Equal(t, fields[1].Key(), "level")
+	require.Equal(t, fields[2].Key(), "metric2")
+}
+
+func TestSpanLoggerLogInnerLevelNonError(t *testing.T) {
+	span, ctx := New(context.Background(), "test")
+	newSpan := FromContext(ctx)
+	require.Equal(t, span.Span, newSpan.Span)
+
+	fields, err, errorKeyIndex, logAsError := span.logInner("bar", "bar_value", "level", "info", "err", errors.New("err"), "metric2", "2hgd")
+	require.Nil(t, err)
+	require.False(t, logAsError)
+	require.Equal(t, errorKeyIndex, -1)
+	require.Equal(t, len(fields), 4)
+}
+
+func TestSpanLoggerLogInnerLevelErrorWithNoErrorEntry(t *testing.T) {
+	span, ctx := New(context.Background(), "test")
+	newSpan := FromContext(ctx)
+	require.Equal(t, span.Span, newSpan.Span)
+
+	fields, err, errorKeyIndex, logAsError := span.logInner("bar", "bar_value", "level", "error", "err", "err_string", "metric2", "2hgd")
+	require.Nil(t, err)
+	require.False(t, logAsError)
+	require.Equal(t, errorKeyIndex, -1)
+	require.Equal(t, len(fields), 4)
+}
+
+func TestSpanLoggerLogInnerLogsFirstError(t *testing.T) {
+	span, ctx := New(context.Background(), "test")
+	newSpan := FromContext(ctx)
+	require.Equal(t, span.Span, newSpan.Span)
+
+	fields, err, errorKeyIndex, logAsError := span.logInner("bar", "bar_value", "first_err", errors.New("first"), "second_err", errors.New("second"), "level", "error")
+	require.Nil(t, err)
+	require.True(t, logAsError)
+	require.Equal(t, errorKeyIndex, 2)
+	require.Equal(t, len(fields), 3)
 }
 
 func TestSpanLogger_CustomLogger(t *testing.T) {
