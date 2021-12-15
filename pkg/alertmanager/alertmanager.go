@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/flagext"
+	"github.com/grafana/dskit/services"
 	"github.com/pkg/errors"
 	"github.com/prometheus/alertmanager/api"
 	"github.com/prometheus/alertmanager/cluster"
@@ -29,6 +31,7 @@ import (
 	"github.com/prometheus/alertmanager/notify/pagerduty"
 	"github.com/prometheus/alertmanager/notify/pushover"
 	"github.com/prometheus/alertmanager/notify/slack"
+	"github.com/prometheus/alertmanager/notify/sns"
 	"github.com/prometheus/alertmanager/notify/victorops"
 	"github.com/prometheus/alertmanager/notify/webhook"
 	"github.com/prometheus/alertmanager/notify/wechat"
@@ -46,9 +49,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/cortexproject/cortex/pkg/alertmanager/alertstore"
-	"github.com/cortexproject/cortex/pkg/util/flagext"
 	util_net "github.com/cortexproject/cortex/pkg/util/net"
-	"github.com/cortexproject/cortex/pkg/util/services"
 )
 
 const (
@@ -194,7 +195,7 @@ func New(cfg *Config, reg *prometheus.Registry) (*Alertmanager, error) {
 	am.nflog, err = nflog.New(
 		nflog.WithRetention(cfg.Retention),
 		nflog.WithSnapshot(filepath.Join(cfg.TenantDataDir, notificationLogSnapshot)),
-		nflog.WithMaintenance(maintenancePeriod, am.stop, am.wg.Done),
+		nflog.WithMaintenance(maintenancePeriod, am.stop, am.wg.Done, nil),
 		nflog.WithMetrics(am.registry),
 		nflog.WithLogger(log.With(am.logger, "component", "nflog")),
 	)
@@ -238,7 +239,7 @@ func New(cfg *Config, reg *prometheus.Registry) (*Alertmanager, error) {
 
 	am.wg.Add(1)
 	go func() {
-		am.silences.Maintenance(maintenancePeriod, silencesFile, am.stop)
+		am.silences.Maintenance(maintenancePeriod, silencesFile, am.stop, nil)
 		am.wg.Done()
 	}()
 
@@ -514,6 +515,9 @@ func buildReceiverIntegrations(nc *config.Receiver, tmpl *template.Template, fir
 	}
 	for i, c := range nc.PushoverConfigs {
 		add("pushover", i, c, func(l log.Logger) (notify.Notifier, error) { return pushover.New(c, tmpl, l, httpOps...) })
+	}
+	for i, c := range nc.SNSConfigs {
+		add("sns", i, c, func(l log.Logger) (notify.Notifier, error) { return sns.New(c, tmpl, l, httpOps...) })
 	}
 	// If we add support for more integrations, we need to add them to validation as well. See validation.allowedIntegrationNames field.
 	if errs.Len() > 0 {

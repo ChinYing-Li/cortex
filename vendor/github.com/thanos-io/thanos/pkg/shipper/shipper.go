@@ -15,15 +15,16 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
+
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/objstore"
@@ -344,7 +345,7 @@ func (s *Shipper) upload(ctx context.Context, meta *metadata.Meta) error {
 	if err := os.RemoveAll(updir); err != nil {
 		return errors.Wrap(err, "clean upload directory")
 	}
-	if err := os.MkdirAll(updir, 0777); err != nil {
+	if err := os.MkdirAll(updir, 0750); err != nil {
 		return errors.Wrap(err, "create upload dir")
 	}
 	defer func() {
@@ -408,7 +409,7 @@ func (s *Shipper) blockMetasFromOldest() (metas []*metadata.Meta, _ error) {
 func hardlinkBlock(src, dst string) error {
 	chunkDir := filepath.Join(dst, block.ChunksDirname)
 
-	if err := os.MkdirAll(chunkDir, 0777); err != nil {
+	if err := os.MkdirAll(chunkDir, 0750); err != nil {
 		return errors.Wrap(err, "create chunks dir")
 	}
 
@@ -473,7 +474,7 @@ func WriteMetaFile(logger log.Logger, dir string, meta *Meta) error {
 
 // ReadMetaFile reads the given meta from <dir>/thanos.shipper.json.
 func ReadMetaFile(dir string) (*Meta, error) {
-	b, err := ioutil.ReadFile(filepath.Join(dir, MetaFilename))
+	b, err := ioutil.ReadFile(filepath.Join(dir, filepath.Clean(MetaFilename)))
 	if err != nil {
 		return nil, err
 	}
